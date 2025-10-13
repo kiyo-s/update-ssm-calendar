@@ -147,10 +147,19 @@ type CalendarEvent struct {
 - `StartTime`: イベント開始日時(UTC)
 - `EndTime`: イベント終了日時(UTC)
 
+#### 定数定義
+
+```go
+// MaxDocumentSize はSSM Documentの最大サイズ(バイト)
+// 参考: https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_UpdateDocument.html
+const MaxDocumentSize = 64 * 1024 // 64 KB
+```
+
 **設計ノート:**
 - `EventDefinition` はYAML構造をそのまま表現
 - `CalendarEvent` はAWS APIに渡す形式
 - `generator` パッケージが `EventDefinition` → `CalendarEvent` への変換を担当
+- `MaxDocumentSize` は`generator`パッケージでiCalendar生成時のサイズバリデーションに使用
 
 ### 5.2 `internal/config` - 設定管理
 
@@ -185,6 +194,18 @@ type Config struct {
 
 ### 5.3 `internal/calendar` - Change Calendar操作
 
+#### 背景: Change CalendarとAWS API
+
+Change CalendarはSystems Managerドキュメント(タイプ: `ChangeCalendar`)として管理され、iCalendar 2.0形式でイベントデータを保存する。
+
+**API操作:**
+- `UpdateDocument`: ドキュメント全体を更新(既存イベントは自動的に置き換えられる)
+- `DescribeDocument`: ドキュメントの存在確認と情報取得
+
+**参考資料:**
+- [AWS Systems Manager Change Calendar](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-change-calendar.html)
+- [UpdateDocument API](https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_UpdateDocument.html)
+
 #### インターフェース定義
 
 ```go
@@ -192,7 +213,6 @@ package calendar
 
 import (
     "context"
-    "update-ssm-calendar/internal/models"
 )
 
 // Client はChange Calendar操作のインターフェース
@@ -200,20 +220,15 @@ type Client interface {
     // CalendarExists は指定されたCalendarが存在するかを確認
     CalendarExists(ctx context.Context, name string) (bool, error)
 
-    // DeleteAllEvents は既存のすべてのイベントを削除
-    // 戻り値: 削除したイベント数, エラー
-    DeleteAllEvents(ctx context.Context, name string) (int, error)
-
-    // CreateEvents は新規イベントを登録
-    CreateEvents(ctx context.Context, name string, events []models.CalendarEvent) error
-
-    // GetDocumentSize は現在のドキュメントサイズを取得(バリデーション用)
-    // 戻り値: サイズ(バイト), エラー
-    GetDocumentSize(ctx context.Context, name string) (int, error)
+    // UpdateCalendar はCalendarの内容を更新(iCalendar形式)
+    // 既存のイベントはすべて置き換えられる
+    // ドライランモードの場合は実際の更新を行わない
+    UpdateCalendar(ctx context.Context, name string, iCalContent string) error
 }
 ```
 
 **設計ノート:**
+- `UpdateDocument` APIはドキュメント全体を置き換えるため、個別のイベント削除APIは不要
 - インターフェースを定義することで、テスト時にモック実装を使用可能
 - `context.Context` を受け取り、タイムアウトやキャンセル処理に対応
 - 実装は `calendar.go` に、モックは `mock.go` に配置
@@ -224,12 +239,27 @@ type Client interface {
 // AWSClient はClient インターフェースの実装
 type AWSClient struct {
     ssmClient *ssm.Client
+    dryRun    bool
     logger    *logger.Logger
 }
 
 // NewAWSClient は新しいAWSClientを作成
-func NewAWSClient(cfg aws.Config, log *logger.Logger) *AWSClient
+func NewAWSClient(cfg aws.Config, dryRun bool, log *logger.Logger) *AWSClient
+
+// UpdateCalendar の実装
+func (c *AWSClient) UpdateCalendar(ctx context.Context, name string, iCalContent string) error {
+    if c.dryRun {
+        c.logger.Info("Dry run: would update calendar")
+        return nil
+    }
+    // 実際のUpdateDocument API呼び出し
+}
 ```
+
+**ドライランモードの制御:**
+- `AWSClient`がドライランフラグを保持
+- `UpdateCalendar`内でドライラン時は実際のAPI呼び出しをスキップ
+- `CalendarExists`は常に実行(ドライラン時も存在確認は必要)
 
 ### 5.4 `internal/logger` - ログ出力
 
@@ -316,21 +346,29 @@ func (l *Logger) Debug(msg string)
    ↓ 設定の読み込み・検証
 
 3. parser
-   ↓ YAMLファイル読み込み
+   ↓ YAMLファイル読み込み (EventDefinition配列)
 
 4. validator
-   ↓ バリデーション実行
+   ↓ YAMLデータのバリデーション実行
 
 5. generator
-   ↓ 週次定義 → 日次イベント展開
+   ↓ 週次定義 → 日次イベント展開 (CalendarEvent配列)
+   ↓ iCalendar形式への変換
+   ↓ ドキュメントサイズのバリデーション (MaxDocumentSize)
 
-6. calendar.DeleteAllEvents
-   ↓ 既存イベント削除
+6. calendar.CalendarExists
+   ↓ Change Calendarの存在確認
 
-7. calendar.CreateEvents
-   ↓ 新規イベント登録
+7. calendar.UpdateCalendar
+   ↓ iCalendar形式でCalendar全体を更新
+   (ドライランモードの場合はスキップ)
 
 8. 成功/失敗の出力
+```
+
+**データ変換の流れ:**
+```
+YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 ```
 
 ### 7.2 エラーハンドリングフロー
@@ -354,7 +392,7 @@ func (l *Logger) Debug(msg string)
 
 ### 8.2 AWS関連
 
-- [ ] Change Calendarドキュメントサイズの制限値
+- [x] Change Calendarドキュメントサイズの制限値 → 64KB (UpdateDocument APIの制限)
 - [ ] AWS SDK v2の具体的なAPI呼び出し方法
 - [ ] 必要なIAM権限の詳細
 
