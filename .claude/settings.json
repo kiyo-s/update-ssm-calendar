@@ -1,3 +1,10 @@
 {
-    "outputStyle": "Learning"
+    "outputStyle": "Learning",
+    "permissions": {
+        "allow": [],
+        "deny": [
+            "Bash(rm:*)",
+            "Bash(git reset:*)"
+        ]
+    }
 }

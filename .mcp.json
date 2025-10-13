@@ -1,0 +1,27 @@
+{
+    "mcpServers": {
+        "serena": {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--from",
+                "git+https://github.com/oraios/serena",
+                "serena",
+                "start-mcp-server",
+                "--context",
+                "ide-assistant",
+                "--project",
+                "/Users/kiyos/ghq/github.com/kiyo-s/update-ssm-calendar"
+            ],
+            "env": {}
+        },
+        "aws-knowledge-mcp-server": {
+            "command": "uvx",
+            "args": [
+                "fastmcp",
+                "run",
+                "https://knowledge-mcp.global.api.aws"
+            ]
+        }
+    }
+}
