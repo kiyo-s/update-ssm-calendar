@@ -487,6 +487,596 @@ func main() {
 - コマンドライン引数と環境変数の優先順位制御も `config.LoadConfig()` で実施
 - エラーハンドリングは各ステップで行い、適切な終了コードを返す
 
+### 5.7 `internal/generator` - イベント生成とiCalendar変換
+
+#### 責務
+
+`generator`パッケージは以下の2つの主要な変換を担当:
+
+1. **週次イベント定義 → 日次イベントへの展開**
+   - `EventDefinition` (YAMLから読み込んだ週次定義) を指定日数分の `CalendarEvent` に展開
+   - 曜日計算、日時計算、タイムゾーン処理
+
+2. **CalendarEvent配列 → iCalendar形式文字列への変換**
+   - `CalendarEvent` 配列をiCalendar 2.0 (RFC 5545) 準拠の文字列に変換
+   - VCALENDARとVEVENTの生成
+   - ドキュメントサイズのバリデーション
+
+#### iCalendarライブラリの選定
+
+**決定: 自作実装を採用**
+
+**選定理由:**
+
+| 観点 | 評価 |
+|------|------|
+| 要件の範囲 | VEVENTの生成のみで十分。RRULE、VALARM等は不要 |
+| 外部依存 | 不要。標準ライブラリのみで実装可能 |
+| 実装コスト | 初期実装4時間 + テスト3時間 = 1日以内で完了可能 |
+| 保守性 | 要件が明確で限定的なため、将来の変更も予測可能 |
+
+**検討した代替案:**
+
+1. **arran4/golang-ical** (Apache-2.0)
+   - メリット: 使いやすいAPI、活発なメンテナンス
+   - デメリット: 外部依存、不要な機能を含む
+
+2. **emersion/go-ical** (MIT)
+   - メリット: RFC準拠の詳細な実装
+   - デメリット: APIが冗長、外部依存
+
+**自作実装の注意点:**
+
+実装時に対応が必要な項目:
+
+| 項目 | 対応方法 | 難易度 |
+|------|---------|--------|
+| 改行コード | CRLF (`\r\n`) に統一 | ★☆☆☆☆ |
+| 日時フォーマット | `time.Format("20060102T150405")` | ★★☆☆☆ |
+| テキストエスケープ | `;`, `,`, `\`, 改行をエスケープ | ★★☆☆☆ |
+| 行の折り返し | 75オクテット超過時に折り返し | ★★★☆☆ |
+| タイムゾーン検証 | `time.LoadLocation()` で検証 | ★★★☆☆ |
+
+**品質保証:**
+
+- AWS Change Calendarでの実動作確認を早期に実施
+- [iCalendar.org Validator](https://icalendar.org/validator.html)での検証
+- 特殊文字を含むテストケースの作成
+
+#### 構造体設計
+
+```go
+package generator
+
+import (
+    "time"
+    "github.com/kiyo-s/update-ssm-calendar/internal/models"
+)
+
+// Generator はイベント生成とiCalendar変換を担当
+type Generator struct {
+    timezone     string
+    durationDays int
+}
+
+// NewGenerator は新しいGeneratorを作成
+func NewGenerator(timezone string, durationDays int) *Generator
+
+// GenerateEvents は週次イベント定義から日次イベントを生成
+func (g *Generator) GenerateEvents(
+    definitions []models.EventDefinition,
+) ([]models.CalendarEvent, error)
+
+// GenerateICalendar はCalendarEvent配列からiCalendar形式文字列を生成
+func (g *Generator) GenerateICalendar(
+    events []models.CalendarEvent,
+    calendarType string,
+) (string, error)
+```
+
+**設計ノート:**
+
+- iCalendar生成は標準ライブラリの `strings.Builder` を使用
+- エスケープ処理、行折り返しは内部関数として実装
+- DTSTAMP(イベント作成タイムスタンプ)は自動生成
+- SEQUENCE プロパティは不要(AWS Change Calendarでは使用しない)
+- ドキュメントサイズは `models.MaxDocumentSize` (64KB) でバリデーション
+
+#### 週次→日次変換ロジックの詳細
+
+**1. 曜日計算アルゴリズム**
+
+`GenerateEvents` 関数の内部処理フロー:
+
+```go
+func (g *Generator) GenerateEvents(
+    definitions []models.EventDefinition,
+) ([]models.CalendarEvent, error) {
+    var events []models.CalendarEvent
+
+    // 現在時刻をタイムゾーンに合わせて取得
+    loc, err := time.LoadLocation(g.timezone)
+    if err != nil {
+        return nil, err
+    }
+    startDate := time.Now().In(loc)
+    endDate := startDate.AddDate(0, 0, g.durationDays)
+
+    // 各イベント定義について処理
+    for _, def := range definitions {
+        // startDate から endDate まで1日ずつ繰り返し
+        for currentDate := startDate; currentDate.Before(endDate); currentDate = currentDate.AddDate(0, 0, 1) {
+            // 曜日が一致する場合のみイベント生成
+            if matchesDayOfWeek(currentDate, def.StartDayOfWeek) {
+                event, err := createCalendarEvent(def, currentDate, g.timezone)
+                if err != nil {
+                    return nil, err
+                }
+                events = append(events, event)
+            }
+        }
+    }
+
+    return events, nil
+}
+```
+
+**内部関数:**
+
+```go
+// matchesDayOfWeek は指定された日付が曜日に一致するかを判定
+func matchesDayOfWeek(date time.Time, dayOfWeek string) bool {
+    // 大文字小文字を区別せずに比較
+    weekday := date.Weekday().String()
+    return strings.EqualFold(weekday, dayOfWeek)
+}
+
+// createCalendarEvent はEventDefinitionとdateからCalendarEventを生成
+func createCalendarEvent(
+    def models.EventDefinition,
+    date time.Time,
+    timezone string,
+) (models.CalendarEvent, error) {
+    // 開始日時を計算
+    startTime, err := combineDateTime(date, def.StartTime, timezone)
+    if err != nil {
+        return models.CalendarEvent{}, err
+    }
+
+    // 終了日時を計算（複数日にまたがる場合を考慮）
+    endDate := date
+    if needsDateAdjustment(def.StartDayOfWeek, def.EndDayOfWeek) {
+        endDate = calculateEndDate(date, def.StartDayOfWeek, def.EndDayOfWeek)
+    }
+    endTime, err := combineDateTime(endDate, def.EndTime, timezone)
+    if err != nil {
+        return models.CalendarEvent{}, err
+    }
+
+    // UID を生成（決定論的）
+    uid := generateUID(def.Name, date)
+
+    return models.CalendarEvent{
+        UID:       uid,
+        Summary:   def.Name,
+        StartTime: startTime,
+        EndTime:   endTime,
+        Timezone:  timezone,
+    }, nil
+}
+```
+
+**2. 複数日にまたがるイベントの処理**
+
+金曜日18:00〜月曜日09:00のような週をまたぐイベントに対応:
+
+```go
+// needsDateAdjustment は終了日が開始日と異なる曜日かを判定
+func needsDateAdjustment(startDayOfWeek, endDayOfWeek string) bool {
+    return !strings.EqualFold(startDayOfWeek, endDayOfWeek)
+}
+
+// calculateEndDate は終了日を計算（曜日の差分を考慮）
+func calculateEndDate(startDate time.Time, startDayOfWeek, endDayOfWeek string) time.Time {
+    startWeekday := parseWeekday(startDayOfWeek)
+    endWeekday := parseWeekday(endDayOfWeek)
+
+    // 曜日の差分を計算
+    diff := int(endWeekday) - int(startWeekday)
+    if diff < 0 {
+        // 週をまたぐ場合 (例: Friday -> Monday)
+        diff += 7
+    }
+
+    return startDate.AddDate(0, 0, diff)
+}
+
+// parseWeekday は曜日文字列をtime.Weekdayに変換
+func parseWeekday(dayOfWeek string) time.Weekday {
+    weekdays := map[string]time.Weekday{
+        "sunday":    time.Sunday,
+        "monday":    time.Monday,
+        "tuesday":   time.Tuesday,
+        "wednesday": time.Wednesday,
+        "thursday":  time.Thursday,
+        "friday":    time.Friday,
+        "saturday":  time.Saturday,
+    }
+    return weekdays[strings.ToLower(dayOfWeek)]
+}
+```
+
+**3. タイムゾーン処理**
+
+日付と時刻を結合し、指定されたタイムゾーンの`time.Time`を生成:
+
+```go
+// combineDateTime は日付と時刻文字列を結合してtime.Timeを生成
+func combineDateTime(date time.Time, timeStr string, timezone string) (time.Time, error) {
+    // タイムゾーンをロード
+    loc, err := time.LoadLocation(timezone)
+    if err != nil {
+        return time.Time{}, fmt.Errorf("invalid timezone %s: %w", timezone, err)
+    }
+
+    // 時刻文字列をパース (HH:MM形式)
+    parts := strings.Split(timeStr, ":")
+    if len(parts) != 2 {
+        return time.Time{}, fmt.Errorf("invalid time format: %s", timeStr)
+    }
+
+    hour, err := strconv.Atoi(parts[0])
+    if err != nil {
+        return time.Time{}, fmt.Errorf("invalid hour: %s", parts[0])
+    }
+
+    minute, err := strconv.Atoi(parts[1])
+    if err != nil {
+        return time.Time{}, fmt.Errorf("invalid minute: %s", parts[1])
+    }
+
+    // 日付と時刻を結合
+    combined := time.Date(
+        date.Year(), date.Month(), date.Day(),
+        hour, minute, 0, 0,
+        loc,
+    )
+
+    return combined, nil
+}
+```
+
+**4. UID生成方法**
+
+**決定: 決定論的UIDを採用**
+
+UUID v4 ではなく、イベント名と日付をもとにした決定論的な UID を生成します。
+
+**採用理由:**
+
+| 観点 | 決定論的UID | UUID v4 |
+|------|------------|---------|
+| 衝突の可能性 | ゼロ（入力が一意であれば必ず一意） | 実質ゼロだが理論的には存在 |
+| 外部依存 | 不要 (crypto/sha256 は標準ライブラリ) | github.com/google/uuid が必要 |
+| べき等性 | 同じ入力→同じUID（再実行時も同一） | 毎回異なるUIDが生成される |
+| テスト容易性 | 高い（UIDを予測可能） | 低い（ランダムなため検証困難） |
+
+**実装:**
+
+```go
+import "crypto/sha256"
+
+// generateUID はイベント名と日付から決定論的なUIDを生成
+// SHA-256ハッシュを用いることで、同じ入力に対して常に同じUIDを生成
+func generateUID(eventName string, date time.Time) string {
+    // 入力文字列を作成 (イベント名:日付)
+    input := fmt.Sprintf("%s:%s", eventName, date.Format("2006-01-02"))
+
+    // SHA-256ハッシュを計算
+    hash := sha256.Sum256([]byte(input))
+
+    // UUID形式のような文字列に整形 (8-4-4-4-12 の形式)
+    return fmt.Sprintf("%x-%x-%x-%x-%x",
+        hash[0:4],   // 8文字
+        hash[4:6],   // 4文字
+        hash[6:8],   // 4文字
+        hash[8:10],  // 4文字
+        hash[10:16], // 12文字
+    )
+}
+```
+
+**生成例:**
+
+```
+入力: eventName="Monday Event", date=2025-10-13
+出力: "a1b2c3d4-e5f6-7890-abcd-ef0123456789"
+
+入力: eventName="Monday Event", date=2025-10-20
+出力: "f9e8d7c6-b5a4-3210-9876-543210fedcba"
+```
+
+**利点:**
+
+1. **衝突保証**: イベント名と日付の組み合わせは必ず一意なので、UID衝突はゼロ
+2. **べき等性**: 同じ定義を再実行しても同じUIDが生成され、Change Calendarの不要な更新を削減
+3. **依存削減**: 標準ライブラリのみで実装可能
+4. **テスト容易**: 期待されるUIDを事前に計算できる
+
+#### iCalendar形式変換ロジックの詳細
+
+`GenerateICalendar` 関数は、`CalendarEvent` 配列から iCalendar 2.0 (RFC 5545) 準拠の文字列を生成します。
+
+**1. VCALENDAR と VEVENT の構造**
+
+iCalendar 形式の基本構造:
+
+```icalendar
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//kiyo-s//update-ssm-calendar//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:a1b2c3d4-e5f6-7890-abcd-ef0123456789
+DTSTAMP:20251001T120000Z
+DTSTART;TZID=Asia/Tokyo:20251013T080000
+DTEND;TZID=Asia/Tokyo:20251013T220000
+SUMMARY:Monday Event
+END:VEVENT
+BEGIN:VEVENT
+...
+END:VEVENT
+END:VCALENDAR
+```
+
+**GenerateICalendar 関数の実装:**
+
+```go
+func (g *Generator) GenerateICalendar(
+    events []models.CalendarEvent,
+    calendarType string,
+) (string, error) {
+    var builder strings.Builder
+
+    // VCALENDAR ヘッダー
+    builder.WriteString("BEGIN:VCALENDAR\r\n")
+    builder.WriteString("VERSION:2.0\r\n")
+    builder.WriteString("PRODID:-//kiyo-s//update-ssm-calendar//EN\r\n")
+    builder.WriteString("CALSCALE:GREGORIAN\r\n")
+    builder.WriteString("METHOD:PUBLISH\r\n")
+
+    // 各イベントを VEVENT として追加
+    for _, event := range events {
+        vevent, err := generateVEvent(event)
+        if err != nil {
+            return "", err
+        }
+        builder.WriteString(vevent)
+    }
+
+    // VCALENDAR フッター
+    builder.WriteString("END:VCALENDAR\r\n")
+
+    // ドキュメントサイズのバリデーション
+    content := builder.String()
+    if len(content) > models.MaxDocumentSize {
+        return "", fmt.Errorf(
+            "document size %d bytes exceeds limit %d bytes",
+            len(content),
+            models.MaxDocumentSize,
+        )
+    }
+
+    return content, nil
+}
+```
+
+**VEVENT 生成関数:**
+
+```go
+func generateVEvent(event models.CalendarEvent) (string, error) {
+    var builder strings.Builder
+
+    builder.WriteString("BEGIN:VEVENT\r\n")
+
+    // UID
+    builder.WriteString(fmt.Sprintf("UID:%s\r\n", event.UID))
+
+    // DTSTAMP (現在時刻のUTC)
+    dtstamp := time.Now().UTC().Format("20060102T150405Z")
+    builder.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", dtstamp))
+
+    // DTSTART (タイムゾーン付き)
+    dtstart := formatDateTime(event.StartTime, event.Timezone)
+    builder.WriteString(fmt.Sprintf("DTSTART;TZID=%s:%s\r\n", event.Timezone, dtstart))
+
+    // DTEND (タイムゾーン付き)
+    dtend := formatDateTime(event.EndTime, event.Timezone)
+    builder.WriteString(fmt.Sprintf("DTEND;TZID=%s:%s\r\n", event.Timezone, dtend))
+
+    // SUMMARY (エスケープ処理)
+    summary := escapeText(event.Summary)
+    summaryLine := fmt.Sprintf("SUMMARY:%s\r\n", summary)
+    // 行の折り返し処理
+    foldedSummary := foldLine(summaryLine)
+    builder.WriteString(foldedSummary)
+
+    builder.WriteString("END:VEVENT\r\n")
+
+    return builder.String(), nil
+}
+```
+
+**2. 日時フォーマット変換**
+
+`time.Time` から iCalendar の DATE-TIME 形式 (`YYYYMMDDTHHmmss`) に変換:
+
+```go
+// formatDateTime はtime.TimeをiCalendar DATE-TIME形式に変換
+func formatDateTime(t time.Time, timezone string) string {
+    // タイムゾーンに合わせて変換
+    loc, err := time.LoadLocation(timezone)
+    if err != nil {
+        // エラー時はそのまま使用（バリデーション済みのため到達しない想定）
+        loc = t.Location()
+    }
+
+    localTime := t.In(loc)
+    return localTime.Format("20060102T150405")
+}
+```
+
+**フォーマット例:**
+
+```
+入力: time.Time{2025, 10, 13, 8, 0, 0, 0, Asia/Tokyo}
+出力: "20251013T080000"
+
+入力: time.Time{2025, 12, 31, 23, 59, 0, 0, UTC}
+出力: "20251231T235900"
+```
+
+**3. テキストエスケープ処理**
+
+iCalendar では以下の文字をエスケープする必要があります:
+
+| 文字 | エスケープ方法 |
+|------|--------------|
+| `;` (セミコロン) | `\;` |
+| `,` (カンマ) | `\,` |
+| `\` (バックスラッシュ) | `\\` |
+| 改行 (`\n`) | `\n` (そのまま) |
+
+```go
+// escapeText はiCalendar TEXT型の値をエスケープ
+func escapeText(text string) string {
+    // バックスラッシュを最初にエスケープ（他のエスケープと干渉しないため）
+    text = strings.ReplaceAll(text, "\\", "\\\\")
+    // セミコロンをエスケープ
+    text = strings.ReplaceAll(text, ";", "\\;")
+    // カンマをエスケープ
+    text = strings.ReplaceAll(text, ",", "\\,")
+    // 改行はそのまま（iCalendarでは \n として扱われる）
+    return text
+}
+```
+
+**エスケープ例:**
+
+```
+入力: "Meeting; Tokyo, Japan"
+出力: "Meeting\\; Tokyo\\, Japan"
+
+入力: "Path: C:\\Users\\file.txt"
+出力: "Path: C:\\\\Users\\\\file.txt"
+```
+
+**4. 行の折り返し処理**
+
+RFC 5545 では、1行は75オクテット（バイト）を超えてはならず、超過する場合は次の行の先頭にスペースを入れて折り返します。
+
+```go
+// foldLine は75オクテットを超える行を折り返す
+func foldLine(line string) string {
+    const maxOctets = 75
+
+    // 改行で終わる場合は除去してから処理
+    line = strings.TrimSuffix(line, "\r\n")
+
+    // 75オクテット以下ならそのまま返す
+    if len(line) <= maxOctets {
+        return line + "\r\n"
+    }
+
+    var builder strings.Builder
+    remaining := line
+
+    for len(remaining) > 0 {
+        if len(remaining) <= maxOctets {
+            // 残りがすべて75オクテット以下
+            builder.WriteString(remaining)
+            builder.WriteString("\r\n")
+            break
+        }
+
+        // 75オクテット分を切り出し
+        chunk := remaining[:maxOctets]
+        builder.WriteString(chunk)
+        builder.WriteString("\r\n ")  // 改行 + スペース
+
+        // 次の行（残り）
+        remaining = remaining[maxOctets:]
+    }
+
+    return builder.String()
+}
+```
+
+**折り返し例:**
+
+```
+入力 (80文字):
+"SUMMARY:This is a very long summary that exceeds the 75 octet limit for iCalendar"
+
+出力 (折り返し後):
+"SUMMARY:This is a very long summary that exceeds the 75 octet limit for i\r\n Calendar"
+       ^75文字目で改行+スペース
+```
+
+**5. ドキュメントサイズのバリデーション**
+
+AWS Systems Manager の UpdateDocument API は最大 64KB (65,536 bytes) のドキュメントを受け付けます。
+
+```go
+// GenerateICalendar 内でのバリデーション
+content := builder.String()
+if len(content) > models.MaxDocumentSize {
+    return "", fmt.Errorf(
+        "document size %d bytes exceeds limit %d bytes (remove %d events or reduce event names)",
+        len(content),
+        models.MaxDocumentSize,
+        estimateEventsToRemove(len(content), models.MaxDocumentSize, len(events)),
+    )
+}
+```
+
+**推定削除イベント数の計算:**
+
+```go
+// estimateEventsToRemove は超過サイズから削除すべきイベント数を推定
+func estimateEventsToRemove(currentSize, maxSize, eventCount int) int {
+    if currentSize <= maxSize {
+        return 0
+    }
+
+    excessSize := currentSize - maxSize
+    // 1イベントあたりの平均サイズを計算
+    avgEventSize := currentSize / eventCount
+    // 必要な削除イベント数（+1は安全マージン）
+    return (excessSize / avgEventSize) + 1
+}
+```
+
+**設計上の考慮事項:**
+
+| 項目 | 対応 |
+|------|------|
+| 改行コード | すべて CRLF (`\r\n`) に統一 |
+| 文字エンコーディング | UTF-8 (Go標準) |
+| タイムゾーン表現 | TZID パラメータを使用 (例: `DTSTART;TZID=Asia/Tokyo:...`) |
+| プロパティの順序 | UID → DTSTAMP → DTSTART → DTEND → SUMMARY の順 |
+| 必須プロパティ | UID, DTSTAMP, DTSTART のみ（DTEND と SUMMARY は任意だが常に出力） |
+
+**テスト項目:**
+
+1. **基本的なイベント生成**: 単純なイベントが正しく生成されるか
+2. **特殊文字のエスケープ**: `;`, `,`, `\` を含むイベント名が正しくエスケープされるか
+3. **長いイベント名の折り返し**: 75オクテット超のイベント名が正しく折り返されるか
+4. **ドキュメントサイズ超過**: 64KBを超える場合にエラーが返されるか
+5. **タイムゾーン処理**: 異なるタイムゾーンで正しくフォーマットされるか
+6. **iCalendar バリデーター**: 生成された文字列が https://icalendar.org/validator.html で検証可能か
+
 ## 6. テスト戦略
 
 ### 6.1 テスト対象とアプローチ
@@ -574,7 +1164,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 
 - [ ] `internal/parser` の関数シグネチャ
 - [x] `internal/validator` のバリデーションルール構造 → セクション5.4で設計完了
-- [ ] `internal/generator` のイベント生成ロジック
+- [x] `internal/generator` のイベント生成ロジック → セクション5.7で詳細設計完了（週次→日次変換、iCalendar変換、決定論的UID）
 - [ ] `internal/errors` のエラー型定義
 
 ### 8.2 AWS関連
@@ -586,8 +1176,8 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 ### 8.3 その他
 
 - [x] コマンドライン引数のパースライブラリ選定 → 標準ライブラリ `flag` を採用 (セクション5.6)
-- [ ] タイムゾーン変換の実装詳細
-- [ ] 曜日パースのロジック
+- [x] タイムゾーン変換の実装詳細 → セクション5.7で設計完了 (combineDateTime, formatDateTime)
+- [x] 曜日パースのロジック → セクション5.7で設計完了 (matchesDayOfWeek, parseWeekday)
 
 ## 9. 次のステップ
 
@@ -601,10 +1191,17 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
   - [x] `calendar`: Client インターフェース、ドライランモード制御
   - [x] `validator`: Validator、バリデーション項目、内部関数設計
   - [x] `logger`: Logger, LogLevel
+  - [x] `generator`: Generator構造体、責務定義、iCalendar自作の決定、**詳細設計完了**
   - [x] `cmd/update-ssm-calendar/main.go`: コマンドライン引数、処理フロー、終了コード
 - [x] AWS API仕様の調査と設計への反映
 - [x] iCalendar 2.0 (RFC 5545)仕様の調査とCalendarEvent設計への反映
+- [x] iCalendarライブラリの選定 → 自作実装を採用(セクション5.7)
 - [x] 要件定義書の更新反映 (コマンドライン引数追加、バリデーション要件追加)
+- [x] `internal/generator` パッケージの詳細設計
+  - [x] 週次→日次変換ロジック (曜日計算、複数日にまたがるイベント処理)
+  - [x] タイムゾーン処理 (combineDateTime, formatDateTime)
+  - [x] 決定論的UID生成 (SHA-256ベース)
+  - [x] iCalendar形式変換ロジック (VCALENDAR/VEVENT生成、エスケープ、行折り返し、サイズバリデーション)
 
 ### 9.2 次回の進め方(候補)
 
@@ -615,10 +1212,10 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 - [ ] `internal/parser` の設計
   - YAMLファイル読み込みの関数シグネチャ
   - エラーハンドリング
-- [ ] `internal/validator` の設計
+- [x] `internal/validator` の設計 → セクション5.4で完了
   - バリデーションルールの構造
   - 各バリデーション関数の定義
-- [ ] `internal/generator` の設計
+- [x] `internal/generator` の設計 → セクション5.7で完了
   - イベント生成ロジック (週次→日次)
   - iCalendar形式への変換
   - タイムゾーン処理
@@ -637,7 +1234,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
   - Phase 3: テスト
 - [ ] 技術的な調査項目
   - コマンドライン引数パースライブラリ (cobra, flag, etc.)
-  - iCalendarライブラリ (既存 or 自作)
+  - ~~iCalendarライブラリ (既存 or 自作)~~ → **決定: 自作 (詳細はセクション5.7参照)**
   - AWS SDK v2の使用方法
 
 #### 案3: 実装開始
