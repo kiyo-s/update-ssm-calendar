@@ -101,6 +101,7 @@ errors (すべてのパッケージから参照可能)
 ```
 
 **依存の方向性:**
+
 - `models` はどのパッケージにも依存しない(基本データ構造)
 - `errors` は `models` のみに依存
 - 各パッケージは `logger` を使用してログ出力
@@ -125,6 +126,7 @@ type EventDefinition struct {
 ```
 
 **フィールド説明:**
+
 - `Name`: イベント名
 - `StartDayOfWeek`: 開始曜日 (例: "Monday", 大文字小文字区別なし)
 - `StartTime`: 開始時刻 (形式: "HH:MM")
@@ -143,6 +145,7 @@ type CalendarEvent struct {
 ```
 
 **フィールド説明:**
+
 - `Name`: イベント名
 - `StartTime`: イベント開始日時(UTC)
 - `EndTime`: イベント終了日時(UTC)
@@ -156,6 +159,7 @@ const MaxDocumentSize = 64 * 1024 // 64 KB
 ```
 
 **設計ノート:**
+
 - `EventDefinition` はYAML構造をそのまま表現
 - `CalendarEvent` はAWS APIに渡す形式
 - `generator` パッケージが `EventDefinition` → `CalendarEvent` への変換を担当
@@ -181,6 +185,7 @@ type Config struct {
 ```
 
 **フィールド説明:**
+
 - `CalendarName`: 対象のChange Calendar名
 - `ConfigFile`: YAMLファイルのパス
 - `DryRun`: ドライランモード (true: 実際の変更を行わない)
@@ -189,6 +194,7 @@ type Config struct {
 - `Timezone`: タイムゾーン、デフォルト: "UTC"
 
 **設計ノート:**
+
 - AWS関連の設定(リージョン、認証情報)はAWS SDKのデフォルト設定に任せる
 - 環境変数: `AWS_REGION`, `AWS_PROFILE` など
 
@@ -199,10 +205,12 @@ type Config struct {
 Change CalendarはSystems Managerドキュメント(タイプ: `ChangeCalendar`)として管理され、iCalendar 2.0形式でイベントデータを保存する。
 
 **API操作:**
+
 - `UpdateDocument`: ドキュメント全体を更新(既存イベントは自動的に置き換えられる)
 - `DescribeDocument`: ドキュメントの存在確認と情報取得
 
 **参考資料:**
+
 - [AWS Systems Manager Change Calendar](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-change-calendar.html)
 - [UpdateDocument API](https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_UpdateDocument.html)
 
@@ -228,6 +236,7 @@ type Client interface {
 ```
 
 **設計ノート:**
+
 - `UpdateDocument` APIはドキュメント全体を置き換えるため、個別のイベント削除APIは不要
 - インターフェースを定義することで、テスト時にモック実装を使用可能
 - `context.Context` を受け取り、タイムアウトやキャンセル処理に対応
@@ -257,6 +266,7 @@ func (c *AWSClient) UpdateCalendar(ctx context.Context, name string, iCalContent
 ```
 
 **ドライランモードの制御:**
+
 - `AWSClient`がドライランフラグを保持
 - `UpdateCalendar`内でドライラン時は実際のAPI呼び出しをスキップ
 - `CalendarExists`は常に実行(ドライラン時も存在確認は必要)
@@ -300,6 +310,7 @@ func (l *Logger) Debug(msg string)
 ```
 
 **設計ノート:**
+
 - `io.Writer` を受け取ることで、テスト時に出力先を変更可能
 - 各レベルに応じて出力を制御
 - フォーマット付き出力用に `Errorf`, `Infof` なども追加可能
@@ -322,10 +333,12 @@ func (l *Logger) Debug(msg string)
 ### 6.2 テストデータ
 
 #### `testdata/` ディレクトリ
+
 - 各パッケージ配下に配置(Go標準)
 - 例: `internal/parser/testdata/valid.yaml`
 
 #### モック実装
+
 - `internal/calendar/mock.go`: AWS API呼び出しのモック
 - テーブル駆動テストで複数のケースを効率的にカバー
 
@@ -367,6 +380,7 @@ func (l *Logger) Debug(msg string)
 ```
 
 **データ変換の流れ:**
+
 ```
 YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 ```
@@ -374,6 +388,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 ### 7.2 エラーハンドリングフロー
 
 各ステップでエラーが発生した場合:
+
 1. 該当パッケージがエラーを返す
 2. `main.go` でエラーをキャッチ
 3. `logger.Error()` でエラーメッセージを出力
@@ -420,6 +435,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 以下のいずれかから作業を開始:
 
 #### 案1: 残りのパッケージ詳細設計
+
 - [ ] `internal/parser` の設計
   - YAMLファイル読み込みの関数シグネチャ
   - エラーハンドリング
@@ -436,6 +452,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
   - エラーメッセージの標準化
 
 #### 案2: プロトタイプ実装計画
+
 - [ ] 実装の優先順位決定
   - コアロジック優先 vs エンドツーエンド優先
 - [ ] マイルストーン設定
@@ -448,6 +465,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
   - AWS SDK v2の使用方法
 
 #### 案3: 実装開始
+
 - [ ] `models`パッケージから実装 (依存なし)
 - [ ] `logger`パッケージの実装
 - [ ] `config`パッケージの実装
@@ -458,6 +476,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 **案1 (残りのパッケージ詳細設計) を推奨**
 
 理由:
+
 - 特に`generator`パッケージは複雑なロジック (週次→日次変換、iCalendar生成) を含む
 - 設計を先に固めることで、実装時の手戻りを削減
 - `validator`と`generator`のバリデーション責務を明確にする必要がある
