@@ -82,7 +82,7 @@ update-ssm-calendar --calendar <calendar-name> --config <config-file> [options]
 - `--dry-run`: ドライランモード(実際の変更は行わない)
 - `--log-level`: ログ出力レベル (`silent`, `normal`, `verbose`) デフォルト: `normal`
 - `--calendar-duration-days`: イベント登録期間 (日数) デフォルト: `365`
-- `--calendar-timezone`: タイムゾーン (IANA 形式) デフォルト: `Asia/Tokyo`
+- `--calendar-timezone`: タイムゾーン (IANA 形式) デフォルト: `UTC`
 
 #### 2.2.3 環境変数
 
