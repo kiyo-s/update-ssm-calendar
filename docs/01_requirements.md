@@ -3,9 +3,11 @@
 ## 1. 概要
 
 ### 1.1 目的
+
 開発・テスト環境のサーバーを稼働させる時間を管理するため、YAMLファイルの定義に従ってAWS Systems Manager Change Calendarのイベントを登録するコマンドラインツールを開発する。
 
 ### 1.2 対象ユーザー
+
 - 開発担当者
 - 運用担当者
 
@@ -14,14 +16,17 @@
 ### 2.1 基本機能
 
 #### 2.1.1 イベント登録
+
 - YAMLファイルで定義された週次イベントを、指定された期間分、Change Calendarに登録する
 - 一週間単位の設定をひとかたまりとして、指定された日数分のイベントを生成・登録する
 - 実行日を起点として、指定日数分のイベントを登録する(デフォルト: 365日)
 
 #### 2.1.2 既存イベントの扱い
+
 - Change Calendarに既存のイベントが登録されている場合、**すべて削除してから新規作成**する
 
 #### 2.1.3 ドライラン機能
+
 - `--dry-run` オプションにより、実際にはAWSへの変更を行わず、実行内容の確認のみを行う
 
 ### 2.2 入力仕様
@@ -42,10 +47,12 @@
 - 大文字小文字は区別しない(`monday`, `MONDAY`, `Monday` すべて有効)
 
 **時刻の指定:**
+
 - 24時間形式: `HH:MM` (例: `08:00`, `22:30`)
 - YAMLファイル内の時刻は、環境変数で指定されたタイムゾーンとして解釈される
 
 **YAMLファイル例:**
+
 ```yaml
 - name: "Monday Event"
   start_day_of_week: "Monday"
@@ -66,54 +73,64 @@ update-ssm-calendar --calendar <calendar-name> --config <config-file> [options]
 ```
 
 **必須オプション:**
+
 - `--calendar`: Change Calendar名
 - `--config`: YAMLファイルのパス
 
 **任意オプション:**
+
 - `--dry-run`: ドライランモード(実際の変更は行わない)
 - `--log-level`: ログ出力レベル (`silent`, `normal`, `verbose`) デフォルト: `normal`
+- `--calendar-duration-days`: イベント登録期間 (日数) デフォルト: `365`
+- `--calendar-timezone`: タイムゾーン (IANA 形式) デフォルト: `Asia/Tokyo`
 
 #### 2.2.3 環境変数
 
 | 環境変数名 | 説明 | デフォルト値 | 例 |
 |-----------|------|-------------|-----|
-| `SSM_CALENDAR_DURATION_DAYS` | イベント登録期間(日数) | `365` | `365` |
-| `SSM_CALENDAR_TIMEZONE` | タイムゾーン(IANA形式) | `UTC` | `Asia/Tokyo` |
+| `SSM_CALENDAR_DURATION_DAYS` | イベント登録期間 (日数) | `365` | `365` |
+| `SSM_CALENDAR_TIMEZONE` | タイムゾーン (IANA 形式) | `UTC` | `Asia/Tokyo` |
 
 **AWS認証情報:**
-- AWS SDKの標準的な認証情報取得方法に従う
+
+- AWS SDK の標準的な認証情報取得方法に従う
   - 環境変数: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
   - 認証情報ファイル: `~/.aws/credentials`
   - IAMロール など
 
 ### 2.3 バリデーション
 
-#### 2.3.1 YAMLファイルのバリデーション
+#### 2.3.1 オプションに関するバリデーション
+
+1. **イベント登録期間**
+   - データが正の整数か
+   - 値が `1` から `1,827` (約 5 年) の範囲に含まれるか
+2. **タイムゾーン**
+   - IANA 形式か
+
+#### 2.3.2 YAML ファイルのバリデーション
+
 以下の項目をAWS変更前にチェックし、不正があれば異常終了する:
 
 1. **必須フィールドの存在確認**
    - `name`, `start_day_of_week`, `start_time`, `end_day_of_week`, `end_time` がすべて存在するか
-
 2. **曜日の妥当性チェック**
    - 指定された曜日が有効な値(`Monday`〜`Sunday`)であるか
-
 3. **時刻フォーマットのチェック**
    - `HH:MM` 形式であるか
    - 時は `00`〜`23`、分は `00`〜`59` の範囲内であるか
-
 4. **イベント期間の妥当性チェック**
    - 終了日時が開始日時より後であるか(同一曜日の場合は終了時刻が開始時刻より後)
    - 複数日にまたがるイベントの場合、論理的に正しいか
-
 5. **Change Calendarドキュメントサイズの制限チェック**
    - 生成されるイベントの総サイズがChange Calendarの制限(詳細は実装時に調査)を超えないか
 
-#### 2.3.2 AWS関連のバリデーション
+#### 2.3.3 AWS関連のバリデーション
+
 以下の項目をチェックし、問題があれば異常終了する:
 
 1. **AWS認証情報の確認**
    - 有効な認証情報が設定されているか
-
 2. **Change Calendarの存在確認**
    - 指定されたChange Calendarが存在するか
    - ※将来的にはCalendar作成機能を追加する可能性がある
@@ -160,6 +177,7 @@ update-ssm-calendar --calendar <calendar-name> --config <config-file> [options]
 ### 2.5 エラーハンドリング
 
 #### 2.5.1 エラー発生時の動作
+
 - すべてのエラーは標準エラー出力に出力する
 - エラーメッセージは人間が理解しやすい形式とする
 - 適切な終了コードを返す
@@ -179,26 +197,32 @@ update-ssm-calendar --calendar <calendar-name> --config <config-file> [options]
 ## 3. 非機能要件
 
 ### 3.1 パフォーマンス
+
 - 処理時間は十分短い想定のため、進捗表示は不要
 
 ### 3.2 拡張性
-- 将来的にChange Calendarの作成機能を追加する可能性を考慮した設計とする
+
+- 将来的に Change Calendar の作成機能を追加する可能性を考慮した設計とする
 
 ### 3.3 開発言語
-- Go言語を使用
+
+- Go 言語を使用
 
 ### 3.4 依存関係
-- AWS SDK for Go v2を使用
+
+- AWS SDK for Go v2 を使用
 - その他、必要に応じて標準ライブラリまたはサードパーティライブラリを使用
 
 ## 4. 制約事項
 
-### 4.1 Change Calendar制約
-- AWS Systems Manager Change Calendarのドキュメントサイズ制限に従う
+### 4.1 Change Calendar 制約
+
+- AWS Systems Manager Change Calendar のドキュメントサイズ制限に従う
 - 登録可能なイベント数には実質的な上限が存在する
 
 ### 4.2 実行環境
-- AWS認証情報が適切に設定されている必要がある
+
+- AWS 認証情報が適切に設定されている必要がある
 - 必要なIAM権限:
   - `ssm:GetCalendarState`
   - `ssm:DescribeDocument`
@@ -229,7 +253,8 @@ update-ssm-calendar --calendar my-calendar --config events.yaml
 ### 5.2 出力例
 
 #### normal レベル (デフォルト)
-```
+
+```text
 Loaded 5 events from events.yaml
 Validation passed
 Target Calendar: my-calendar (ap-northeast-1)
@@ -239,7 +264,8 @@ Success!
 ```
 
 #### verbose レベル
-```
+
+```text
 Loaded 5 events from events.yaml
   - Monday Event (Monday 08:00 - Monday 22:00)
   - Tuesday Event (Tuesday 08:00 - Tuesday 22:00)
@@ -264,11 +290,13 @@ Success!
 ## 6. 補足事項
 
 ### 6.1 今後の検討事項
-- Change Calendar自動作成機能
+
+- Change Calendar 自動作成機能
 - イベント定義の差分更新機能
-- 複数のChange Calendarへの一括登録
-- JSONフォーマットのサポート
+- 複数の Change Calendar への一括登録
+- JSON フォーマットのサポート
 
 ### 6.2 参考資料
+
 - [AWS Systems Manager Change Calendar](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-change-calendar.html)
 - [AWS SDK for Go v2](https://aws.github.io/aws-sdk-go-v2/)
