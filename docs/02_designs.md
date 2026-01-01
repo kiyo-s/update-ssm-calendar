@@ -172,31 +172,49 @@ package config
 
 // Config はアプリケーション全体の設定を保持
 type Config struct {
-    // コマンドライン引数から設定される項目
+    // 必須設定項目
     CalendarName string
     ConfigFile   string
+
+    // オプション設定項目
     DryRun       bool
     LogLevel     string
-
-    // 環境変数から設定される項目
-    DurationDays int    // SSM_CALENDAR_DURATION_DAYS
-    Timezone     string // SSM_CALENDAR_TIMEZONE (IANA形式)
+    DurationDays int    // イベント登録期間(日数)
+    Timezone     string // タイムゾーン (IANA形式)
 }
 ```
 
 **フィールド説明:**
 
-- `CalendarName`: 対象のChange Calendar名
-- `ConfigFile`: YAMLファイルのパス
-- `DryRun`: ドライランモード (true: 実際の変更を行わない)
-- `LogLevel`: ログ出力レベル ("silent", "normal", "verbose")
+- `CalendarName`: 対象のChange Calendar名 (必須)
+- `ConfigFile`: YAMLファイルのパス (必須)
+- `DryRun`: ドライランモード (デフォルト: false)
+- `LogLevel`: ログ出力レベル ("silent", "normal", "verbose")、デフォルト: "normal"
 - `DurationDays`: イベント登録期間(日数)、デフォルト: 365
 - `Timezone`: タイムゾーン、デフォルト: "UTC"
+
+**設定の優先順位:**
+
+`DurationDays`と`Timezone`は以下の優先順位で設定される:
+1. **コマンドライン引数** (`--calendar-duration-days`, `--calendar-timezone`)
+2. **環境変数** (`SSM_CALENDAR_DURATION_DAYS`, `SSM_CALENDAR_TIMEZONE`)
+3. **デフォルト値** (365, "UTC")
+
+**関数設計:**
+```go
+// LoadConfig はコマンドライン引数と環境変数から設定を読み込む
+// 優先順位: コマンドライン引数 > 環境変数 > デフォルト値
+func LoadConfig() (*Config, error)
+
+// Validate は設定値の妥当性を検証
+func (c *Config) Validate() error
+```
 
 **設計ノート:**
 
 - AWS関連の設定(リージョン、認証情報)はAWS SDKのデフォルト設定に任せる
 - 環境変数: `AWS_REGION`, `AWS_PROFILE` など
+- `Validate()`メソッドで日数範囲(1-1827)とIANA形式タイムゾーンを検証
 
 ### 5.3 `internal/calendar` - Change Calendar操作
 
@@ -271,7 +289,66 @@ func (c *AWSClient) UpdateCalendar(ctx context.Context, name string, iCalContent
 - `UpdateCalendar`内でドライラン時は実際のAPI呼び出しをスキップ
 - `CalendarExists`は常に実行(ドライラン時も存在確認は必要)
 
-### 5.4 `internal/logger` - ログ出力
+### 5.4 `internal/validator` - バリデーション
+
+```go
+package validator
+
+import "github.com/kiyo-s/update-ssm-calendar/internal/models"
+
+// Validator はバリデーション機能を提供
+type Validator struct{}
+
+// NewValidator は新しいValidatorを作成
+func NewValidator() *Validator
+
+// ValidateConfig は設定値のバリデーションを実行
+func (v *Validator) ValidateConfig(durationDays int, timezone string) error
+
+// ValidateEventDefinitions はイベント定義のバリデーションを実行
+func (v *Validator) ValidateEventDefinitions(events []models.EventDefinition) error
+```
+
+**バリデーション項目:**
+
+**1. 設定値のバリデーション (`ValidateConfig`)**
+- イベント登録期間の範囲チェック (1 ≤ days ≤ 1827)
+- タイムゾーンのIANA形式チェック (例: "UTC", "Asia/Tokyo")
+
+**2. イベント定義のバリデーション (`ValidateEventDefinitions`)**
+- 必須フィールドの存在確認
+- 曜日の妥当性チェック (Monday-Sunday)
+- 時刻フォーマットのチェック (HH:MM形式、時:00-23、分:00-59)
+- イベント期間の妥当性チェック (終了日時 > 開始日時)
+
+**内部関数設計:**
+```go
+// validateDurationDays はイベント登録期間の妥当性を検証
+func validateDurationDays(days int) error
+
+// validateTimezone はタイムゾーンのIANA形式を検証
+func validateTimezone(tz string) error
+
+// validateRequiredFields は必須フィールドの存在を確認
+func validateRequiredFields(event models.EventDefinition) error
+
+// validateDayOfWeek は曜日の妥当性を確認
+func validateDayOfWeek(day string) error
+
+// validateTimeFormat は時刻フォーマットを確認
+func validateTimeFormat(timeStr string) error
+
+// validateEventPeriod はイベント期間の妥当性を確認
+func validateEventPeriod(event models.EventDefinition) error
+```
+
+**設計ノート:**
+- タイムゾーン検証には標準ライブラリ `time.LoadLocation()` を使用
+- 曜日は大文字小文字を区別しないため、正規化してから比較
+- エラーメッセージは具体的かつ人間が理解しやすい形式
+- ドキュメントサイズのバリデーションは `generator` パッケージで実施
+
+### 5.5 `internal/logger` - ログ出力
 
 ```go
 package logger
@@ -314,6 +391,67 @@ func (l *Logger) Debug(msg string)
 - `io.Writer` を受け取ることで、テスト時に出力先を変更可能
 - 各レベルに応じて出力を制御
 - フォーマット付き出力用に `Errorf`, `Infof` なども追加可能
+
+### 5.6 `cmd/update-ssm-calendar/main.go` - エントリーポイント
+
+**コマンドライン引数:**
+
+```bash
+update-ssm-calendar --calendar <name> --config <file> [options]
+```
+
+**必須オプション:**
+- `--calendar`: Change Calendar名
+- `--config`: YAMLファイルのパス
+
+**任意オプション:**
+- `--dry-run`: ドライランモード
+- `--log-level`: ログレベル (silent/normal/verbose)、デフォルト: normal
+- `--calendar-duration-days`: イベント登録期間(日数)、デフォルト: 365
+- `--calendar-timezone`: タイムゾーン(IANA形式)、デフォルト: UTC
+
+**処理フロー:**
+
+```go
+func main() {
+    // 1. コマンドライン引数のパース
+    // 2. 設定の読み込み (config.LoadConfig)
+    // 3. Loggerの初期化
+    // 4. 設定のバリデーション (config.Validate)
+    // 5. YAMLファイルの読み込み (parser.ParseYAML)
+    // 6. イベント定義のバリデーション (validator.ValidateEventDefinitions)
+    // 7. イベント生成 (generator.GenerateEvents)
+    // 8. AWS Clientの初期化
+    // 9. Change Calendarの存在確認
+    // 10. Change Calendarの更新 (ドライラン考慮)
+    // 11. 結果の出力
+    // エラーハンドリング: 各ステップでエラーが発生した場合、適切な終了コードで終了
+}
+```
+
+**終了コード:**
+- 0: 成功
+- 1: 一般的なエラー
+- 2: コマンドライン引数エラー
+- 3: YAMLファイル読み込みエラー
+- 4: バリデーションエラー
+- 5: AWS認証エラー
+- 6: AWS API呼び出しエラー
+
+**コマンドライン引数パースライブラリ:**
+- **候補1**: 標準ライブラリ `flag` パッケージ
+  - メリット: 標準ライブラリ、依存なし、シンプル
+  - デメリット: サブコマンド機能なし、ヘルプメッセージの自動生成が限定的
+- **候補2**: `github.com/spf13/cobra`
+  - メリット: 豊富な機能、ヘルプメッセージの自動生成、広く使われている
+  - デメリット: 外部依存、このツールには過剰かもしれない
+
+**推奨**: このツールの規模を考慮し、標準ライブラリの `flag` パッケージを推奨
+
+**設計ノート:**
+- 環境変数の読み込みは `config.LoadConfig()` 内で実施
+- コマンドライン引数と環境変数の優先順位制御も `config.LoadConfig()` で実施
+- エラーハンドリングは各ステップで行い、適切な終了コードを返す
 
 ## 6. テスト戦略
 
@@ -401,7 +539,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 ### 8.1 構造体・インターフェースの詳細
 
 - [ ] `internal/parser` の関数シグネチャ
-- [ ] `internal/validator` のバリデーションルール構造
+- [x] `internal/validator` のバリデーションルール構造 → セクション5.4で設計完了
 - [ ] `internal/generator` のイベント生成ロジック
 - [ ] `internal/errors` のエラー型定義
 
@@ -413,7 +551,7 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 
 ### 8.3 その他
 
-- [ ] コマンドライン引数のパースライブラリ選定 (cobra, flag, etc.)
+- [x] コマンドライン引数のパースライブラリ選定 → 標準ライブラリ `flag` を採用 (セクション5.6)
 - [ ] タイムゾーン変換の実装詳細
 - [ ] 曜日パースのロジック
 
@@ -425,10 +563,13 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 - [x] ディレクトリ構成の決定
 - [x] 主要な構造体とインターフェースの設計
   - [x] `models`: EventDefinition, CalendarEvent, MaxDocumentSize
-  - [x] `config`: Config
+  - [x] `config`: Config、設定の優先順位ロジック、LoadConfig/Validate関数
   - [x] `calendar`: Client インターフェース、ドライランモード制御
+  - [x] `validator`: Validator、バリデーション項目、内部関数設計
   - [x] `logger`: Logger, LogLevel
+  - [x] `cmd/update-ssm-calendar/main.go`: コマンドライン引数、処理フロー、終了コード
 - [x] AWS API仕様の調査と設計への反映
+- [x] 要件定義書の更新反映 (コマンドライン引数追加、バリデーション要件追加)
 
 ### 9.2 次回の進め方(候補)
 
