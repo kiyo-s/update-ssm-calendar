@@ -1,7 +1,9 @@
 {
     "outputStyle": "Learning",
     "permissions": {
-        "allow": [],
+        "allow": [
+            "WebSearch"
+        ],
         "deny": [
             "Bash(rm:*)",
             "Bash(git reset:*)"
