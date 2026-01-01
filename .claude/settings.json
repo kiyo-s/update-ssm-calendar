@@ -6,5 +6,9 @@
             "Bash(rm:*)",
             "Bash(git reset:*)"
         ]
-    }
+    },
+    "enabledMcpjsonServers": [
+        "serena",
+        "aws-knowledge-mcp-server"
+    ]
 }
