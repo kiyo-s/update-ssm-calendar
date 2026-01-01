@@ -137,18 +137,48 @@ type EventDefinition struct {
 
 ```go
 // CalendarEvent はChange Calendarに登録する実際のイベント
+// iCalendar形式への変換はgeneratorパッケージが担当する
 type CalendarEvent struct {
-    Name      string
-    StartTime time.Time  // UTC時刻
-    EndTime   time.Time  // UTC時刻
+    // UID はイベントの一意識別子 (iCalendar: UID)
+    UID string
+
+    // Summary はイベント名 (iCalendar: SUMMARY)
+    Summary string
+
+    // StartTime はイベント開始日時 (iCalendar: DTSTART)
+    StartTime time.Time
+
+    // EndTime はイベント終了日時 (iCalendar: DTEND)
+    EndTime time.Time
+
+    // Timezone はIANA形式のタイムゾーン (iCalendar: TZID parameter)
+    // 例: "UTC", "Asia/Tokyo"
+    Timezone string
 }
 ```
 
 **フィールド説明:**
 
-- `Name`: イベント名
-- `StartTime`: イベント開始日時(UTC)
-- `EndTime`: イベント終了日時(UTC)
+- `UID`: イベントの一意識別子。UUIDなどを使用
+- `Summary`: イベント名・簡潔な説明
+- `StartTime`: イベント開始日時。Go標準の`time.Time`型で保持
+- `EndTime`: イベント終了日時。`StartTime`より後でなければならない
+- `Timezone`: IANA形式のタイムゾーン(例: "Asia/Tokyo", "UTC")
+
+**iCalendarプロパティとの対応:**
+
+| Goフィールド | iCalendarプロパティ | 備考 |
+|-------------|-------------------|------|
+| `UID` | `UID` | 必須。イベントの一意識別子 |
+| `Summary` | `SUMMARY` | イベント名 |
+| `StartTime` | `DTSTART` | DATE-TIME形式に変換 |
+| `EndTime` | `DTEND` | DATE-TIME形式に変換 |
+| `Timezone` | `TZID` parameter | DTSTARTとDTENDのパラメータとして使用 |
+
+**自動生成されるプロパティ:**
+
+`generator`パッケージがiCalendar生成時に自動的に追加:
+- `DTSTAMP`: イベント作成タイムスタンプ(現在時刻のUTCを使用)
 
 #### 定数定義
 
@@ -160,10 +190,14 @@ const MaxDocumentSize = 64 * 1024 // 64 KB
 
 **設計ノート:**
 
-- `EventDefinition` はYAML構造をそのまま表現
-- `CalendarEvent` はAWS APIに渡す形式
-- `generator` パッケージが `EventDefinition` → `CalendarEvent` への変換を担当
+- `EventDefinition` はYAML構造をそのまま表現(週次イベント定義)
+- `CalendarEvent` はGoのドメインモデル(日次イベント)
+- `generator` パッケージが以下の変換を担当:
+  - `EventDefinition` → `CalendarEvent` (週次→日次への展開)
+  - `CalendarEvent` → iCalendar形式文字列 (AWS APIへの渡し形式)
 - `MaxDocumentSize` は`generator`パッケージでiCalendar生成時のサイズバリデーションに使用
+- `CalendarEvent`のフィールド名はGoの可読性を優先し、iCalendarプロパティ名との対応はコメントで明記
+- iCalendar DATE-TIME形式: `YYYYMMDDTHHmmss` (例: `20240812T090000`)
 
 ### 5.2 `internal/config` - 設定管理
 
@@ -562,13 +596,14 @@ YAML → EventDefinition → CalendarEvent → iCalendar文字列 → AWS API
 - [x] アーキテクチャスタイルの決定 (パッケージベース)
 - [x] ディレクトリ構成の決定
 - [x] 主要な構造体とインターフェースの設計
-  - [x] `models`: EventDefinition, CalendarEvent, MaxDocumentSize
+  - [x] `models`: EventDefinition, CalendarEvent (iCalendar仕様に基づく設計), MaxDocumentSize
   - [x] `config`: Config、設定の優先順位ロジック、LoadConfig/Validate関数
   - [x] `calendar`: Client インターフェース、ドライランモード制御
   - [x] `validator`: Validator、バリデーション項目、内部関数設計
   - [x] `logger`: Logger, LogLevel
   - [x] `cmd/update-ssm-calendar/main.go`: コマンドライン引数、処理フロー、終了コード
 - [x] AWS API仕様の調査と設計への反映
+- [x] iCalendar 2.0 (RFC 5545)仕様の調査とCalendarEvent設計への反映
 - [x] 要件定義書の更新反映 (コマンドライン引数追加、バリデーション要件追加)
 
 ### 9.2 次回の進め方(候補)
